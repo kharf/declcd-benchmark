@@ -2,23 +2,16 @@ package {{ .Package }}
 
 import (
 	"github.com/kharf/declcd/schema/component"
+	"github.com/kharf/declcd-benchmark/repository/apps"
 	corev1 "k8s.io/api/core/v1"
 	appsv1 "k8s.io/api/apps/v1"
 )
-
-{{ .Namespace }}: component.#Manifest & {
-	content: corev1.#Namespace & {
-		apiVersion: string | *"v1"
-		kind:       "Namespace"
-		metadata: name: "{{ .Namespace }}"
-	}
-}
 
 service: component.#Manifest & {
 	#Name:      "{{ .App }}"
 	#Namespace: "{{ .Namespace }}"
 	dependencies: [
-		{{ .Namespace }}.id
+		apps.{{ .Namespace }}.id
 	]
 	content: corev1.#Service & {
 		apiVersion: string | *"v1"

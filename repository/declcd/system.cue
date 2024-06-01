@@ -207,9 +207,7 @@ statefulSet: component.#Manifest & {
 				spec: {
 					serviceAccountName: _name
 					securityContext: {
-						runAsNonRoot:        true
-						fsGroup:             65532
-						fsGroupChangePolicy: "OnRootMismatch"
+						runAsUser: 0
 					}
 					volumes: [
 						{
@@ -223,11 +221,18 @@ statefulSet: component.#Manifest & {
 								]
 							}
 						},
+						{
+							name: "repository"
+							hostPath: {
+								path: "/repository"
+								type: "Directory"
+							}
+						},
 					]
 					containers: [
 						{
 							name:  _name
-							image: "ghcr.io/kharf/declcd:0.20.0"
+							image: "ghcr.io/kharf/declcd:0.22.2"
 							command: [
 								"/controller",
 							]
@@ -267,6 +272,10 @@ statefulSet: component.#Manifest & {
 								{
 									name:      "podinfo"
 									mountPath: "/podinfo"
+								},
+								{
+									name:      "repository"
+									mountPath: "/repository"
 								},
 							]
 						},
