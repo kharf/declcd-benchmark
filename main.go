@@ -8,6 +8,9 @@ import (
 	"os/exec"
 	"path/filepath"
 	"text/template"
+	"time"
+
+	"golang.org/x/sync/errgroup"
 )
 
 //go:embed templates/app.cue
@@ -100,7 +103,18 @@ nodes:
 		"--wait",
 		"5m",
 	)
-	defer runCmd("kind", "delete", "cluster", "--name", "declcd-benchmark")
+	defer func() {
+		if r := recover(); r != nil {
+			fmt.Println("recovered")
+		}
+
+		runCmd(
+			"repository",
+			"sh",
+			"-c",
+			"kind delete cluster --name declcd-benchmark",
+		)
+	}()
 
 	runCmd(
 		"",
@@ -114,6 +128,13 @@ nodes:
 		"sh",
 		"-c",
 		"helm install metrics-server metrics-server/metrics-server --set args=\"{--kubelet-insecure-tls}\"",
+	)
+
+	runCmd(
+		"",
+		"sh",
+		"-c",
+		"kubectl wait --for=condition=Available deploy/metrics-server --timeout=60s",
 	)
 
 	err = os.Setenv("CUE_EXPERIMENT", "modules")
@@ -133,6 +154,60 @@ nodes:
 		"3600",
 	)
 
+	eg := errgroup.Group{}
+	done := make(chan bool)
+	eg.Go(func() error {
+		ticker := time.NewTicker(5 * time.Second)
+		for {
+			select {
+			case <-done:
+				return nil
+			case <-ticker.C:
+				_ = runCmdWithErr(
+					"",
+					"sh",
+					"-c",
+					"kubectl -n declcd-system top pod gitops-controller-0",
+				)
+			}
+		}
+	})
+
+	runCmd(
+		"",
+		"sh",
+		"-c",
+		"kubectl wait -n declcd-system --for=condition=Ready pod/gitops-controller-0 --timeout=60s",
+	)
+
+	runCmd(
+		"",
+		"sh",
+		"-c",
+		"kubectl wait -n declcd-system --for=condition=Running gitopsprojects.gitops.declcd.io/benchmark --timeout=60s",
+	)
+
+	runCmd(
+		"",
+		"sh",
+		"-c",
+		"kubectl wait -n declcd-system --for=condition=Finished gitopsprojects.gitops.declcd.io/benchmark --timeout=600s",
+	)
+
+	done <- true
+	err = eg.Wait()
+	assertNilErr(err)
+
+	fmt.Println("==================================================")
+
+	runCmd(
+		"",
+		"sh",
+		"-c",
+		"kubectl describe gitopsprojects.gitops.declcd.io/benchmark -n declcd-system | grep \"Last Transition Time\"",
+	)
+
+	fmt.Println("\n==================================================")
 }
 
 func makeFile(dir string, name string, templateName string, data map[string]interface{}) {
@@ -148,11 +223,21 @@ func makeFile(dir string, name string, templateName string, data map[string]inte
 	assertNilErr(err)
 }
 
+func runCmdWithErr(dir string, name string, args ...string) error {
+	cmd := exec.Command(name, args...)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	cmd.Dir = dir
+
+	return cmd.Run()
+}
+
 func runCmd(dir string, name string, args ...string) {
 	cmd := exec.Command(name, args...)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	cmd.Dir = dir
+
 	err := cmd.Run()
 	assertNilErr(err)
 }
