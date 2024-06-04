@@ -251,6 +251,7 @@ statefulSet: component.#Manifest & {
 							resources: {
 								limits: {
 									memory: "1.5Gi"
+									cpu:    "2000m"
 								}
 								requests: {
 									memory: "1.5Gi"

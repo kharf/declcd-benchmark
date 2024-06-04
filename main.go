@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	_ "embed"
 	"flag"
 	"fmt"
@@ -31,13 +32,33 @@ func main() {
 	appsDir := filepath.Join(repositoryDir, "apps")
 	infraDir := filepath.Join(repositoryDir, "infrastructure")
 
+	nodeImage := "kindest/node:v1.29.2"
+	localRegistryPort := 5001
+	registryPort := 5000
+	registryName := "declcd-registry"
 	kindConfig := fmt.Sprintf(`apiVersion: kind.x-k8s.io/v1alpha4
 kind: Cluster
+containerdConfigPatches:
+- |-
+  [plugins."io.containerd.grpc.v1.cri".registry.mirrors."localhost:%v"]
+    endpoint = ["http://%s:%v"]
 nodes:
   - role: control-plane
+    image: %s
+    extraMounts:
+      - hostPath: %s
+        containerPath: /repository
+  - role: worker
+    image: %s
     extraMounts:
       - hostPath: %s
         containerPath: /repository`,
+		localRegistryPort,
+		registryName,
+		registryPort,
+		nodeImage,
+		repositoryDir,
+		nodeImage,
 		repositoryDir,
 	)
 
@@ -66,6 +87,34 @@ nodes:
 			"Namespace": "alpha",
 		})
 	}
+
+	runCmd(
+		"",
+		"sh",
+		"-c",
+		fmt.Sprintf(
+			"docker run -d --restart=always -p \"127.0.0.1:%v:%v\" --network bridge --name \"%s\" registry:2",
+			localRegistryPort,
+			registryPort,
+			registryName,
+		),
+	)
+
+	runCmd(
+		"",
+		"sh",
+		"-c",
+		fmt.Sprintf(
+			"docker network connect \"kind\" \"%s\"",
+			registryName,
+		),
+	)
+
+	timeoutCtx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	err = copyImage(timeoutCtx, localRegistryPort)
+	assertNilErr(err)
 
 	err = os.WriteFile(filepath.Join(wd, "kind-config.yaml"), []byte(kindConfig), 0666)
 	assertNilErr(err)
@@ -108,12 +157,23 @@ nodes:
 			fmt.Println("recovered")
 		}
 
-		runCmd(
+		_ = runCmdWithErr(
 			"repository",
 			"sh",
 			"-c",
 			"kind delete cluster --name declcd-benchmark",
 		)
+
+		_ = runCmdWithErr(
+			"",
+			"sh",
+			"-c",
+			fmt.Sprintf(
+				"docker rm %s -f",
+				registryName,
+			),
+		)
+
 	}()
 
 	runCmd(
@@ -121,6 +181,33 @@ nodes:
 		"sh",
 		"-c",
 		"helm repo add metrics-server https://kubernetes-sigs.github.io/metrics-server/",
+	)
+
+	runCmd(
+		"",
+		"sh",
+		"-c",
+		fmt.Sprintf(
+			`cat <<EOF | kubectl apply --server-side -f-
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: local-registry-hosting
+  namespace: kube-public
+data:
+  localRegistryHosting.v1: |
+    host: "localhost:%v"
+    hostFromContainerRuntime: "%s:%d"
+    hostFromClusterNetwork: "%s:%d"
+    help: "https://kind.sigs.k8s.io/docs/user/local-registry/"
+EOF
+`,
+			localRegistryPort,
+			registryName,
+			registryPort,
+			registryName,
+			registryPort,
+		),
 	)
 
 	runCmd(
@@ -208,6 +295,42 @@ nodes:
 	)
 
 	fmt.Println("\n==================================================")
+}
+
+func copyImage(ctx context.Context, port int) error {
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	default:
+	}
+
+	if err := runCmdWithErr(
+		"",
+		"sh",
+		"-c",
+		fmt.Sprintf(
+			"crane copy gcr.io/kubernetes-e2e-test-images/echoserver:2.2 localhost:%v/kubernetes-e2e-test-images/echoserver:2.2",
+			port,
+		),
+	); err != nil {
+		time.Sleep(2 * time.Second)
+		return copyImage(
+			ctx,
+			port,
+		)
+	}
+
+	runCmdWithErr(
+		"",
+		"sh",
+		"-c",
+		fmt.Sprintf(
+			"docker tag gcr.io/kubernetes-e2e-test-images/echoserver:2.2 localhost:%v/echoserver:2.2",
+			port,
+		),
+	)
+
+	return nil
 }
 
 func makeFile(dir string, name string, templateName string, data map[string]interface{}) {

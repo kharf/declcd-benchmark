@@ -53,7 +53,7 @@ deployment: component.#Manifest & {
 			template: {
 				metadata: labels: app: #Name
 				spec: containers: [{
-					image: "gcr.io/kubernetes-e2e-test-images/echoserver:2.2"
+					image: "localhost:5001/kubernetes-e2e-test-images/echoserver:2.2"
 					name:  #Name
 					ports: [{
 						containerPort: 8080
