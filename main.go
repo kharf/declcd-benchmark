@@ -7,7 +7,9 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
+	"syscall"
 	"text/template"
 	"time"
 
@@ -17,13 +19,54 @@ import (
 //go:embed templates/app.cue
 var appTemplate string
 
+//go:embed templates/helm-app.cue
+var helmAppTemplate string
+
 //go:embed templates/ns.cue
 var nsTemplate string
 
 func main() {
-	var appCount int
+	sigs := make(chan os.Signal, 1)
+	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
+	done := make(chan bool, 1)
+	go func() {
+		sig := <-sigs
+		fmt.Println()
+		fmt.Println(sig)
+		done <- true
+	}()
+
+	var appCount, helmAppCount int
 	flag.IntVar(&appCount, "app-count", 1, "")
+	flag.IntVar(&helmAppCount, "helm-app-count", 0, "")
 	flag.Parse()
+
+	nodeImage := "kindest/node:v1.29.2"
+	localRegistryPort := 5000
+
+	cmd := exec.Command(
+		"sh",
+		"-c",
+		fmt.Sprintf("kubectl port-forward svc/twuni-docker-registry %v", localRegistryPort),
+	)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+
+	defer func() {
+		if r := recover(); r != nil {
+			fmt.Println("recovered")
+		}
+		done <- true
+
+		fmt.Println(cmd.Process.Kill())
+
+		_ = runCmdWithErr(
+			"repository",
+			"sh",
+			"-c",
+			"kind delete cluster --name declcd-benchmark",
+		)
+	}()
 
 	wd, err := os.Getwd()
 	assertNilErr(err)
@@ -32,16 +75,8 @@ func main() {
 	appsDir := filepath.Join(repositoryDir, "apps")
 	infraDir := filepath.Join(repositoryDir, "infrastructure")
 
-	nodeImage := "kindest/node:v1.29.2"
-	localRegistryPort := 5001
-	registryPort := 5000
-	registryName := "declcd-registry"
 	kindConfig := fmt.Sprintf(`apiVersion: kind.x-k8s.io/v1alpha4
 kind: Cluster
-containerdConfigPatches:
-- |-
-  [plugins."io.containerd.grpc.v1.cri".registry.mirrors."localhost:%v"]
-    endpoint = ["http://%s:%v"]
 nodes:
   - role: control-plane
     image: %s
@@ -53,9 +88,6 @@ nodes:
     extraMounts:
       - hostPath: %s
         containerPath: /repository`,
-		localRegistryPort,
-		registryName,
-		registryPort,
 		nodeImage,
 		repositoryDir,
 		nodeImage,
@@ -71,7 +103,7 @@ nodes:
 	mkDirAll(appsDir)
 	mkDirAll(infraDir)
 
-	makeFile(appsDir, "alpha.cue", nsTemplate, map[string]interface{}{
+	makeFile(appsDir, "alpha", nsTemplate, map[string]interface{}{
 		"Package":   "apps",
 		"Namespace": "alpha",
 	})
@@ -88,36 +120,130 @@ nodes:
 		})
 	}
 
-	runCmd(
-		"",
-		"sh",
-		"-c",
-		fmt.Sprintf(
-			"docker run -d --restart=always -p \"127.0.0.1:%v:%v\" --network bridge --name \"%s\" registry:2",
-			localRegistryPort,
-			registryPort,
-			registryName,
-		),
-	)
-
-	runCmd(
-		"",
-		"sh",
-		"-c",
-		fmt.Sprintf(
-			"docker network connect \"kind\" \"%s\"",
-			registryName,
-		),
-	)
-
 	timeoutCtx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
-	err = copyImage(timeoutCtx, localRegistryPort)
-	assertNilErr(err)
+	if appCount != 0 {
+		err = copyImage(
+			timeoutCtx,
+			"gcr.io/kubernetes-e2e-test-images/echoserver",
+			"2.2",
+			fmt.Sprintf("localhost:%v/kubernetes-e2e-test-images/echoserver", localRegistryPort),
+		)
+		assertNilErr(err)
+	}
+
+	chartsDir := filepath.Join(wd, "charts")
+	mkDirAll(chartsDir)
+	// defer rmAll(chartsDir)
 
 	err = os.WriteFile(filepath.Join(wd, "kind-config.yaml"), []byte(kindConfig), 0666)
 	assertNilErr(err)
+
+	runCmd(
+		"",
+		"kind",
+		"create",
+		"cluster",
+		"--config",
+		"kind-config.yaml",
+		"--name",
+		"declcd-benchmark",
+		"--wait",
+		"5m",
+	)
+
+	runCmd(
+		"",
+		"sh",
+		"-c",
+		"helm repo add metrics-server https://kubernetes-sigs.github.io/metrics-server/",
+	)
+
+	runCmd(
+		"",
+		"sh",
+		"-c",
+		"helm install metrics-server metrics-server/metrics-server --set args=\"{--kubelet-insecure-tls}\"",
+	)
+
+	runCmd(
+		"",
+		"sh",
+		"-c",
+		"helm repo add twuni https://helm.twun.io",
+	)
+
+	runCmd(
+		"",
+		"sh",
+		"-c",
+		"helm install twuni twuni/docker-registry --set persistence.enabled=true",
+	)
+
+	runCmd(
+		"",
+		"sh",
+		"-c",
+		"kubectl wait deploy twuni-docker-registry --for=condition=Available --timeout=90s",
+	)
+
+	pEG := errgroup.Group{}
+	pEG.Go(func() error {
+		return cmd.Run()
+	})
+
+	for i := range helmAppCount {
+		appName := fmt.Sprintf("helmapp%v", i)
+		helmAppDir := filepath.Join(infraDir, appName)
+		chartName := fmt.Sprintf("fakeapp%v", i)
+
+		mkDirAll(helmAppDir)
+		makeFile(helmAppDir, appName, helmAppTemplate, map[string]interface{}{
+			"Package":   appName,
+			"HelmApp":   appName,
+			"Namespace": "alpha",
+			"ChartName": chartName,
+		})
+
+		runCmd(
+			"charts",
+			"sh",
+			"-c",
+			fmt.Sprintf(
+				"helm create fakeapp%v",
+				i,
+			),
+		)
+
+		runCmd(
+			"charts",
+			"sh",
+			"-c",
+			fmt.Sprintf(
+				"helm package ./fakeapp%v",
+				i,
+			),
+		)
+
+		runCmd(
+			"charts",
+			"sh",
+			"-c",
+			fmt.Sprintf(
+				"helm push fakeapp%v-0.1.0.tgz oci://localhost:%v/charts",
+				i,
+				localRegistryPort,
+			),
+		)
+	}
+
+	runCmd(
+		"",
+		"sh",
+		"-c",
+		"kubectl wait --for=condition=Available deploy/metrics-server --timeout=60s",
+	)
 
 	runCmd(
 		"repository",
@@ -140,93 +266,8 @@ nodes:
 		"\"Init\"",
 	)
 
-	runCmd(
-		"",
-		"kind",
-		"create",
-		"cluster",
-		"--config",
-		"kind-config.yaml",
-		"--name",
-		"declcd-benchmark",
-		"--wait",
-		"5m",
-	)
-	defer func() {
-		if r := recover(); r != nil {
-			fmt.Println("recovered")
-		}
-
-		_ = runCmdWithErr(
-			"repository",
-			"sh",
-			"-c",
-			"kind delete cluster --name declcd-benchmark",
-		)
-
-		_ = runCmdWithErr(
-			"",
-			"sh",
-			"-c",
-			fmt.Sprintf(
-				"docker rm %s -f",
-				registryName,
-			),
-		)
-
-	}()
-
-	runCmd(
-		"",
-		"sh",
-		"-c",
-		"helm repo add metrics-server https://kubernetes-sigs.github.io/metrics-server/",
-	)
-
-	runCmd(
-		"",
-		"sh",
-		"-c",
-		fmt.Sprintf(
-			`cat <<EOF | kubectl apply --server-side -f-
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: local-registry-hosting
-  namespace: kube-public
-data:
-  localRegistryHosting.v1: |
-    host: "localhost:%v"
-    hostFromContainerRuntime: "%s:%d"
-    hostFromClusterNetwork: "%s:%d"
-    help: "https://kind.sigs.k8s.io/docs/user/local-registry/"
-EOF
-`,
-			localRegistryPort,
-			registryName,
-			registryPort,
-			registryName,
-			registryPort,
-		),
-	)
-
-	runCmd(
-		"",
-		"sh",
-		"-c",
-		"helm install metrics-server metrics-server/metrics-server --set args=\"{--kubelet-insecure-tls}\"",
-	)
-
-	runCmd(
-		"",
-		"sh",
-		"-c",
-		"kubectl wait --for=condition=Available deploy/metrics-server --timeout=60s",
-	)
-
 	err = os.Setenv("CUE_EXPERIMENT", "modules")
 	assertNilErr(err)
-
 	runCmd(
 		"repository",
 		"declcd",
@@ -242,7 +283,6 @@ EOF
 	)
 
 	eg := errgroup.Group{}
-	done := make(chan bool)
 	eg.Go(func() error {
 		ticker := time.NewTicker(5 * time.Second)
 		for {
@@ -297,7 +337,12 @@ EOF
 	fmt.Println("\n==================================================")
 }
 
-func copyImage(ctx context.Context, port int) error {
+func copyImage(
+	ctx context.Context,
+	image string,
+	version string,
+	targetImage string,
+) error {
 	select {
 	case <-ctx.Done():
 		return ctx.Err()
@@ -309,26 +354,21 @@ func copyImage(ctx context.Context, port int) error {
 		"sh",
 		"-c",
 		fmt.Sprintf(
-			"crane copy gcr.io/kubernetes-e2e-test-images/echoserver:2.2 localhost:%v/kubernetes-e2e-test-images/echoserver:2.2",
-			port,
+			"crane copy %s:%s %s:%s",
+			image,
+			version,
+			targetImage,
+			version,
 		),
 	); err != nil {
 		time.Sleep(2 * time.Second)
 		return copyImage(
 			ctx,
-			port,
+			image,
+			version,
+			targetImage,
 		)
 	}
-
-	runCmdWithErr(
-		"",
-		"sh",
-		"-c",
-		fmt.Sprintf(
-			"docker tag gcr.io/kubernetes-e2e-test-images/echoserver:2.2 localhost:%v/echoserver:2.2",
-			port,
-		),
-	)
 
 	return nil
 }

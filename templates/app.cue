@@ -48,7 +48,7 @@ deployment: component.#Manifest & {
 			labels: app: #Name
 		}
 		spec: {
-			replicas: 1
+			replicas: 0
 			selector: matchLabels: app: #Name
 			template: {
 				metadata: labels: app: #Name

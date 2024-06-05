@@ -1,0 +1,21 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: ingress
+spec:
+  ingressClassName: contour
+  defaultBackend:
+    service:
+      name: twuni-docker-registry
+      port:
+        number: 5000
+  rules:
+  - http:
+      paths:
+      - pathType: Prefix
+        path: /
+        backend:
+          service:
+            name: twuni-docker-registry
+            port:
+              number: 5000

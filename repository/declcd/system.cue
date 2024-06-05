@@ -232,13 +232,15 @@ statefulSet: component.#Manifest & {
 					containers: [
 						{
 							name:  _name
-							image: "ghcr.io/kharf/declcd:0.22.2"
+							image: "ghcr.io/kharf/declcd:0.22.9"
 							command: [
 								"/controller",
 							]
 							args: [
 								"--leader-elect",
-								"--log-level=0",
+								"--log-level=1",
+								"--insecure-skip-tls-verify",
+								"--plain-http",
 							]
 							securityContext: {
 								allowPrivilegeEscalation: false
