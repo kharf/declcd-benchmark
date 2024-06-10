@@ -1,5 +1,4 @@
 repository/apps
 repository/infrastructure
-repository/secrets/
 kind-config.yaml
 charts/

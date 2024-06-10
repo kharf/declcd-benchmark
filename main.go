@@ -26,24 +26,26 @@ var helmAppTemplate string
 var nsTemplate string
 
 func main() {
-	sigs := make(chan os.Signal, 1)
-	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
-	done := make(chan bool, 1)
-	go func() {
-		sig := <-sigs
-		fmt.Println()
-		fmt.Println(sig)
-		done <- true
-	}()
-
 	var appCount, helmAppCount int
 	flag.IntVar(&appCount, "app-count", 1, "")
 	flag.IntVar(&helmAppCount, "helm-app-count", 0, "")
 	flag.Parse()
 
+	err := run(appCount, helmAppCount)
+	if err != nil {
+		fmt.Println(err)
+	}
+
+	fmt.Println("Finished")
+}
+
+func run(appCount int, helmAppCount int) error {
 	nodeImage := "kindest/node:v1.29.2"
 	localRegistryPort := 5000
 
+	sigs := make(chan os.Signal, 1)
+	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
+	done := make(chan bool, 1)
 	cmd := exec.Command(
 		"sh",
 		"-c",
@@ -52,24 +54,20 @@ func main() {
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 
-	defer func() {
-		if r := recover(); r != nil {
-			fmt.Println("recovered")
+	go func() {
+		sig := <-sigs
+		fmt.Println()
+		fmt.Println(sig)
+		if err := cmd.Process.Kill(); err != nil {
+			fmt.Println(err)
 		}
 		done <- true
-
-		fmt.Println(cmd.Process.Kill())
-
-		_ = runCmdWithErr(
-			"repository",
-			"sh",
-			"-c",
-			"kind delete cluster --name declcd-benchmark",
-		)
 	}()
 
 	wd, err := os.Getwd()
-	assertNilErr(err)
+	if err != nil {
+		return err
+	}
 
 	repositoryDir := filepath.Join(wd, "repository")
 	appsDir := filepath.Join(repositoryDir, "apps")
@@ -96,28 +94,175 @@ nodes:
 
 	fmt.Println(kindConfig)
 
-	rmAll(appsDir)
-	rmAll(infraDir)
-	rmAll(filepath.Join(repositoryDir, ".git"))
+	err = rmAll(appsDir)
+	if err != nil {
+		return err
+	}
+	err = rmAll(infraDir)
+	if err != nil {
+		return err
+	}
+	err = rmAll(filepath.Join(repositoryDir, ".git"))
+	if err != nil {
+		return err
+	}
 
-	mkDirAll(appsDir)
-	mkDirAll(infraDir)
+	err = mkDirAll(appsDir)
+	if err != nil {
+		return err
+	}
+	err = mkDirAll(infraDir)
+	if err != nil {
+		return err
+	}
 
-	makeFile(appsDir, "alpha", nsTemplate, map[string]interface{}{
+	err = makeFile(appsDir, "alpha", nsTemplate, map[string]interface{}{
 		"Package":   "apps",
 		"Namespace": "alpha",
 	})
+	if err != nil {
+		return err
+	}
 
 	for i := range appCount {
 		appName := fmt.Sprintf("app%v", i)
 		appDir := filepath.Join(appsDir, appName)
 
-		mkDirAll(appDir)
-		makeFile(appDir, appName, appTemplate, map[string]interface{}{
+		err = mkDirAll(appDir)
+		if err != nil {
+			return err
+		}
+		err = makeFile(appDir, appName, appTemplate, map[string]interface{}{
 			"Package":   appName,
 			"App":       appName,
 			"Namespace": "alpha",
 		})
+		if err != nil {
+			return err
+		}
+	}
+
+	chartsDir := filepath.Join(wd, "charts")
+	err = mkDirAll(chartsDir)
+	if err != nil {
+		return err
+	}
+	defer rmAll(chartsDir)
+
+	err = os.WriteFile(filepath.Join(wd, "kind-config.yaml"), []byte(kindConfig), 0666)
+	if err != nil {
+		return err
+	}
+
+	err = runCmd(
+		"",
+		"kind create cluster --config kind-config.yaml --name declcd-benchmark --wait 5m",
+	)
+	if err != nil {
+		return err
+	}
+	defer runCmd(
+		"repository",
+		"kind delete cluster --name declcd-benchmark",
+	)
+
+	err = runCmd(
+		"",
+		"helm repo add metrics-server https://kubernetes-sigs.github.io/metrics-server/",
+	)
+	if err != nil {
+		return err
+	}
+
+	err = runCmd(
+		"",
+		"helm install metrics-server metrics-server/metrics-server --set args=\"{--kubelet-insecure-tls}\"",
+	)
+	if err != nil {
+		return err
+	}
+
+	err = runCmd(
+		"",
+		"helm repo add twuni https://helm.twun.io",
+	)
+	if err != nil {
+		return err
+	}
+
+	err = runCmd(
+		"",
+		"helm install twuni twuni/docker-registry --set persistence.enabled=true",
+	)
+	if err != nil {
+		return err
+	}
+
+	err = runCmd(
+		"",
+		"kubectl wait deploy twuni-docker-registry --for=condition=Available --timeout=90s",
+	)
+	if err != nil {
+		return err
+	}
+
+	pEG := errgroup.Group{}
+	pEG.Go(func() error {
+		return cmd.Run()
+	})
+
+	for i := range helmAppCount {
+		appName := fmt.Sprintf("helmapp%v", i)
+		helmAppDir := filepath.Join(infraDir, appName)
+		chartName := fmt.Sprintf("fakeapp%v", i)
+
+		err = mkDirAll(helmAppDir)
+		if err != nil {
+			return err
+		}
+		err = makeFile(helmAppDir, appName, helmAppTemplate, map[string]interface{}{
+			"Package":   appName,
+			"HelmApp":   appName,
+			"Namespace": "alpha",
+			"ChartName": chartName,
+		})
+		if err != nil {
+			return err
+		}
+
+		err = runCmd(
+			"charts",
+			fmt.Sprintf(
+				"helm create fakeapp%v",
+				i,
+			),
+		)
+		if err != nil {
+			return err
+		}
+
+		err = runCmd(
+			"charts",
+			fmt.Sprintf(
+				"helm package ./fakeapp%v",
+				i,
+			),
+		)
+		if err != nil {
+			return err
+		}
+
+		err = runCmd(
+			"charts",
+			fmt.Sprintf(
+				"helm push fakeapp%v-0.1.0.tgz oci://localhost:%v/charts",
+				i,
+				localRegistryPort,
+			),
+		)
+		if err != nil {
+			return err
+		}
 	}
 
 	timeoutCtx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
@@ -130,159 +275,61 @@ nodes:
 			"2.2",
 			fmt.Sprintf("localhost:%v/kubernetes-e2e-test-images/echoserver", localRegistryPort),
 		)
-		assertNilErr(err)
+		if err != nil {
+			return err
+		}
 	}
 
-	chartsDir := filepath.Join(wd, "charts")
-	mkDirAll(chartsDir)
-	// defer rmAll(chartsDir)
-
-	err = os.WriteFile(filepath.Join(wd, "kind-config.yaml"), []byte(kindConfig), 0666)
-	assertNilErr(err)
-
-	runCmd(
+	err = runCmd(
 		"",
-		"kind",
-		"create",
-		"cluster",
-		"--config",
-		"kind-config.yaml",
-		"--name",
-		"declcd-benchmark",
-		"--wait",
-		"5m",
-	)
-
-	runCmd(
-		"",
-		"sh",
-		"-c",
-		"helm repo add metrics-server https://kubernetes-sigs.github.io/metrics-server/",
-	)
-
-	runCmd(
-		"",
-		"sh",
-		"-c",
-		"helm install metrics-server metrics-server/metrics-server --set args=\"{--kubelet-insecure-tls}\"",
-	)
-
-	runCmd(
-		"",
-		"sh",
-		"-c",
-		"helm repo add twuni https://helm.twun.io",
-	)
-
-	runCmd(
-		"",
-		"sh",
-		"-c",
-		"helm install twuni twuni/docker-registry --set persistence.enabled=true",
-	)
-
-	runCmd(
-		"",
-		"sh",
-		"-c",
-		"kubectl wait deploy twuni-docker-registry --for=condition=Available --timeout=90s",
-	)
-
-	pEG := errgroup.Group{}
-	pEG.Go(func() error {
-		return cmd.Run()
-	})
-
-	for i := range helmAppCount {
-		appName := fmt.Sprintf("helmapp%v", i)
-		helmAppDir := filepath.Join(infraDir, appName)
-		chartName := fmt.Sprintf("fakeapp%v", i)
-
-		mkDirAll(helmAppDir)
-		makeFile(helmAppDir, appName, helmAppTemplate, map[string]interface{}{
-			"Package":   appName,
-			"HelmApp":   appName,
-			"Namespace": "alpha",
-			"ChartName": chartName,
-		})
-
-		runCmd(
-			"charts",
-			"sh",
-			"-c",
-			fmt.Sprintf(
-				"helm create fakeapp%v",
-				i,
-			),
-		)
-
-		runCmd(
-			"charts",
-			"sh",
-			"-c",
-			fmt.Sprintf(
-				"helm package ./fakeapp%v",
-				i,
-			),
-		)
-
-		runCmd(
-			"charts",
-			"sh",
-			"-c",
-			fmt.Sprintf(
-				"helm push fakeapp%v-0.1.0.tgz oci://localhost:%v/charts",
-				i,
-				localRegistryPort,
-			),
-		)
-	}
-
-	runCmd(
-		"",
-		"sh",
-		"-c",
 		"kubectl wait --for=condition=Available deploy/metrics-server --timeout=60s",
 	)
+	if err != nil {
+		return err
+	}
 
-	runCmd(
+	err = runDeclcd(done)
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func runDeclcd(done chan bool) error {
+	if err := runCmd(
 		"repository",
-		"git",
-		"init",
-	)
+		"git init",
+	); err != nil {
+		return err
+	}
 
-	runCmd(
+	if err := runCmd(
 		"repository",
-		"git",
-		"add",
-		".",
-	)
+		"git add .",
+	); err != nil {
+		return err
+	}
 
-	runCmd(
+	if err := runCmd(
 		"repository",
-		"git",
-		"commit",
-		"-m",
-		"\"Init\"",
-	)
+		"git commit -m \"Init\"",
+	); err != nil {
+		return err
+	}
 
-	err = os.Setenv("CUE_EXPERIMENT", "modules")
-	assertNilErr(err)
-	runCmd(
+	if err := os.Setenv("CUE_EXPERIMENT", "modules"); err != nil {
+		return err
+	}
+
+	if err := runCmd(
 		"repository",
-		"declcd",
-		"install",
-		"-u",
-		"/repository",
-		"-b",
-		"main",
-		"--name",
-		"benchmark",
-		"-i",
-		"3600",
-	)
+		"declcd install -u /repository -b main --name benchmark -i 3600",
+	); err != nil {
+		return err
+	}
 
-	eg := errgroup.Group{}
+	eg := &errgroup.Group{}
 	eg.Go(func() error {
 		ticker := time.NewTicker(5 * time.Second)
 		for {
@@ -290,51 +337,53 @@ nodes:
 			case <-done:
 				return nil
 			case <-ticker.C:
-				_ = runCmdWithErr(
+				_ = runCmd(
 					"",
-					"sh",
-					"-c",
 					"kubectl -n declcd-system top pod gitops-controller-0",
 				)
 			}
 		}
 	})
 
-	runCmd(
+	if err := runCmd(
 		"",
-		"sh",
-		"-c",
 		"kubectl wait -n declcd-system --for=condition=Ready pod/gitops-controller-0 --timeout=60s",
-	)
+	); err != nil {
+		return err
+	}
 
-	runCmd(
+	if err := runCmd(
 		"",
-		"sh",
-		"-c",
 		"kubectl wait -n declcd-system --for=condition=Running gitopsprojects.gitops.declcd.io/benchmark --timeout=60s",
-	)
+	); err != nil {
+		return err
+	}
 
-	runCmd(
+	if err := runCmd(
 		"",
-		"sh",
-		"-c",
 		"kubectl wait -n declcd-system --for=condition=Finished gitopsprojects.gitops.declcd.io/benchmark --timeout=600s",
-	)
-
-	done <- true
-	err = eg.Wait()
-	assertNilErr(err)
+	); err != nil {
+		return err
+	}
 
 	fmt.Println("==================================================")
 
-	runCmd(
+	if err := runCmd(
 		"",
-		"sh",
-		"-c",
 		"kubectl describe gitopsprojects.gitops.declcd.io/benchmark -n declcd-system | grep \"Last Transition Time\"",
-	)
+	); err != nil {
+		return err
+	}
 
 	fmt.Println("\n==================================================")
+
+	done <- true
+	err := eg.Wait()
+	if err != nil {
+		return err
+	}
+
+	return nil
 }
 
 func copyImage(
@@ -349,10 +398,8 @@ func copyImage(
 	default:
 	}
 
-	if err := runCmdWithErr(
+	if err := runCmd(
 		"",
-		"sh",
-		"-c",
 		fmt.Sprintf(
 			"crane copy %s:%s %s:%s",
 			image,
@@ -373,50 +420,39 @@ func copyImage(
 	return nil
 }
 
-func makeFile(dir string, name string, templateName string, data map[string]interface{}) {
+func makeFile(dir string, name string, templateName string, data map[string]interface{}) error {
 	file, err := os.Create(
 		filepath.Join(dir, fmt.Sprintf("%s.cue", name)),
 	)
-	assertNilErr(err)
+	if err != nil {
+		return err
+	}
 
 	tmpl, err := template.New("").Parse(templateName)
-	assertNilErr(err)
+	if err != nil {
+		return err
+	}
 
 	err = tmpl.Execute(file, data)
-	assertNilErr(err)
+	if err != nil {
+		return err
+	}
+
+	return nil
 }
 
-func runCmdWithErr(dir string, name string, args ...string) error {
-	cmd := exec.Command(name, args...)
+func runCmd(dir string, cmdString string) error {
+	cmd := exec.Command("sh", "-c", cmdString)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	cmd.Dir = dir
-
 	return cmd.Run()
 }
 
-func runCmd(dir string, name string, args ...string) {
-	cmd := exec.Command(name, args...)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	cmd.Dir = dir
-
-	err := cmd.Run()
-	assertNilErr(err)
+func rmAll(dir string) error {
+	return os.RemoveAll(dir)
 }
 
-func rmAll(dir string) {
-	err := os.RemoveAll(dir)
-	assertNilErr(err)
-}
-
-func mkDirAll(dir string) {
-	err := os.MkdirAll(dir, 0777)
-	assertNilErr(err)
-}
-
-func assertNilErr(err error) {
-	if err != nil {
-		panic(err)
-	}
+func mkDirAll(dir string) error {
+	return os.MkdirAll(dir, 0777)
 }
