@@ -15,7 +15,7 @@ release: component.#HelmRelease & {
 	namespace: #Namespace
 	chart: {
 		name: "{{ .ChartName }}"
-		repoURL: "oci://twuni-docker-registry.default.svc:5000/charts"
+		repoURL: "{{ .RepoURL }}"
 		version: "0.1.0"
 	}
 	values: {

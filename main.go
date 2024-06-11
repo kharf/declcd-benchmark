@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"text/template"
 	"time"
@@ -26,12 +27,13 @@ var helmAppTemplate string
 var nsTemplate string
 
 func main() {
-	var appCount, helmAppCount int
-	flag.IntVar(&appCount, "app-count", 1, "")
-	flag.IntVar(&helmAppCount, "helm-app-count", 0, "")
+	var appCount, yamlHelmAppCount, ociHelmAppCount int
+	flag.IntVar(&appCount, "apps", 1, "")
+	flag.IntVar(&yamlHelmAppCount, "yaml-helm-apps", 0, "")
+	flag.IntVar(&ociHelmAppCount, "oci-helm-apps", 0, "")
 	flag.Parse()
 
-	err := run(appCount, helmAppCount)
+	err := run(appCount, yamlHelmAppCount, ociHelmAppCount)
 	if err != nil {
 		fmt.Println(err)
 	}
@@ -39,27 +41,43 @@ func main() {
 	fmt.Println("Finished")
 }
 
-func run(appCount int, helmAppCount int) error {
+func run(appCount int, yamlHelmAppCount int, ociHelmAppCount int) error {
 	nodeImage := "kindest/node:v1.29.2"
 	localRegistryPort := 5000
 
 	sigs := make(chan os.Signal, 1)
 	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
 	done := make(chan bool, 1)
-	cmd := exec.Command(
+	registryPortForwardCmd := exec.Command(
 		"sh",
 		"-c",
 		fmt.Sprintf("kubectl port-forward svc/twuni-docker-registry %v", localRegistryPort),
 	)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
+	registryPortForwardCmd.Stdout = os.Stdout
+	registryPortForwardCmd.Stderr = os.Stderr
+
+	var chartMuseumPortForwardCmd *exec.Cmd
+	if yamlHelmAppCount > 0 {
+		chartMuseumPortForwardCmd = exec.Command(
+			"sh",
+			"-c",
+			fmt.Sprintf("kubectl port-forward svc/chartmuseum %v", 8080),
+		)
+		chartMuseumPortForwardCmd.Stdout = os.Stdout
+		chartMuseumPortForwardCmd.Stderr = os.Stderr
+	}
 
 	go func() {
 		sig := <-sigs
 		fmt.Println()
 		fmt.Println(sig)
-		if err := cmd.Process.Kill(); err != nil {
+		if err := registryPortForwardCmd.Process.Kill(); err != nil {
 			fmt.Println(err)
+		}
+		if chartMuseumPortForwardCmd != nil {
+			if err := chartMuseumPortForwardCmd.Process.Kill(); err != nil {
+				fmt.Println(err)
+			}
 		}
 		done <- true
 	}()
@@ -206,60 +224,60 @@ nodes:
 		return err
 	}
 
+	if yamlHelmAppCount > 0 {
+		err = runCmd(
+			"",
+			"helm repo add chartmuseum https://chartmuseum.github.io/charts",
+		)
+		if err != nil {
+			return err
+		}
+
+		err = runCmd(
+			"",
+			"helm install chartmuseum chartmuseum/chartmuseum --set env.open.DISABLE_API=false",
+		)
+		if err != nil {
+			return err
+		}
+
+		err = runCmd(
+			"",
+			"kubectl wait deploy chartmuseum --for=condition=Available --timeout=90s",
+		)
+		if err != nil {
+			return err
+		}
+	}
+
 	pEG := errgroup.Group{}
 	pEG.Go(func() error {
-		return cmd.Run()
+		return registryPortForwardCmd.Run()
 	})
-
-	for i := range helmAppCount {
-		appName := fmt.Sprintf("helmapp%v", i)
-		helmAppDir := filepath.Join(infraDir, appName)
-		chartName := fmt.Sprintf("fakeapp%v", i)
-
-		err = mkDirAll(helmAppDir)
-		if err != nil {
-			return err
-		}
-		err = makeFile(helmAppDir, appName, helmAppTemplate, map[string]interface{}{
-			"Package":   appName,
-			"HelmApp":   appName,
-			"Namespace": "alpha",
-			"ChartName": chartName,
+	if chartMuseumPortForwardCmd != nil {
+		pEG.Go(func() error {
+			return chartMuseumPortForwardCmd.Run()
 		})
+	}
+
+	for i := range ociHelmAppCount {
+		repoURL := "oci://twuni-docker-registry.default.svc:5000/charts"
+		localRepoURL := fmt.Sprintf(
+			"oci://localhost:%v/charts",
+			localRegistryPort,
+		)
+
+		err := installHelmApp(i, infraDir, repoURL, localRepoURL)
 		if err != nil {
 			return err
 		}
+	}
 
-		err = runCmd(
-			"charts",
-			fmt.Sprintf(
-				"helm create fakeapp%v",
-				i,
-			),
-		)
-		if err != nil {
-			return err
-		}
+	for i := range yamlHelmAppCount {
+		repoURL := "http://chartmuseum.default.svc:8080"
+		localRepoURL := "http://localhost:8080/api/charts"
 
-		err = runCmd(
-			"charts",
-			fmt.Sprintf(
-				"helm package ./fakeapp%v",
-				i,
-			),
-		)
-		if err != nil {
-			return err
-		}
-
-		err = runCmd(
-			"charts",
-			fmt.Sprintf(
-				"helm push fakeapp%v-0.1.0.tgz oci://localhost:%v/charts",
-				i,
-				localRegistryPort,
-			),
-		)
+		err := installHelmApp(i, infraDir, repoURL, localRepoURL)
 		if err != nil {
 			return err
 		}
@@ -291,6 +309,77 @@ nodes:
 	err = runDeclcd(done)
 	if err != nil {
 		return err
+	}
+
+	return nil
+}
+
+func installHelmApp(suffix int, infraDir string, repoURL string, localRepoURL string) error {
+	err := runCmd(
+		"charts",
+		fmt.Sprintf(
+			"helm create fakeapp%v",
+			suffix,
+		),
+	)
+	if err != nil {
+		return err
+	}
+
+	err = runCmd(
+		"charts",
+		fmt.Sprintf(
+			"helm package ./fakeapp%v",
+			suffix,
+		),
+	)
+	if err != nil {
+		return err
+	}
+
+	appName := fmt.Sprintf("helmapp%v", suffix)
+	helmAppDir := filepath.Join(infraDir, appName)
+	chartName := fmt.Sprintf("fakeapp%v", suffix)
+
+	err = mkDirAll(helmAppDir)
+	if err != nil {
+		return err
+	}
+	err = makeFile(helmAppDir, appName, helmAppTemplate, map[string]interface{}{
+		"Package":   appName,
+		"HelmApp":   appName,
+		"Namespace": "alpha",
+		"ChartName": chartName,
+		"RepoURL":   repoURL,
+	})
+	if err != nil {
+		return err
+	}
+
+	if strings.HasPrefix(localRepoURL, "http") {
+		err = runCmd(
+			"charts",
+			fmt.Sprintf(
+				"curl --data-binary \"@fakeapp%v-0.1.0.tgz\" %s",
+				suffix,
+				localRepoURL,
+			),
+		)
+		if err != nil {
+			return err
+		}
+	} else {
+		err = runCmd(
+			"charts",
+			fmt.Sprintf(
+				"helm push fakeapp%v-0.1.0.tgz %s",
+				suffix,
+				localRepoURL,
+			),
+		)
+		if err != nil {
+			return err
+		}
 	}
 
 	return nil
