@@ -420,7 +420,7 @@ func runDeclcd(done chan bool) error {
 
 	eg := &errgroup.Group{}
 	eg.Go(func() error {
-		ticker := time.NewTicker(5 * time.Second)
+		ticker := time.NewTicker(3 * time.Second)
 		for {
 			select {
 			case <-done:
