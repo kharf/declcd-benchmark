@@ -466,6 +466,8 @@ func runDeclcd(done chan bool) error {
 
 	fmt.Println("\n==================================================")
 
+	time.Sleep(10 * time.Second)
+
 	done <- true
 	err := eg.Wait()
 	if err != nil {

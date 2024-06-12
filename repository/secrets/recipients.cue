@@ -1,5 +1,5 @@
 package secrets
 
 {
-	recipient: "age1ur7venevdemdl3rkzaaze4q43nhevpkdxuhgr23mn92yrs7mguzqp76kpt"
+	recipient: "age157txarmkenekcpe39sy8jkz82gatdq64xvr4kzqlr4j26gjk052qna7en4"
 }
