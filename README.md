@@ -1,21 +1,39 @@
 Kernel: 6.8.11-xanmod1 \
 CPU: AMD Ryzen 7 5800X (16) @ 3.800GHz \
-Memory: 32GB \
-K8s: 1.29.2 \
-Declcd: 0.22.9 \
-Controller Resources: \
-limits: { \
-	memory: "1.5Gi" \
-	cpu:    "2000m" \
-} \
-requests: { \
-	memory: "1.5Gi" \
-	cpu:    "500m" \
-} \
+Memory: 32GB
 
 1 App contains 1 Deployment and 1 Service \
 1 HelmRelease App contains 1 Deployment, 1 Service and 1 ServiceAccount \
-3x runs. \
+3x runs.
+
+------------------------------------------------------------------
+
+K8s: 1.29 \
+Declcd: 0.23.1
+
+
+### Results:
+
+| Setup                            | Duration | Max Memory |
+|----------------------------------|----------|------------|
+| 125x Deployments 125x Services   | 18s      | 40Mi       |
+| 125x YAML HelmReleases           | 28s      | 49Mi       |
+| 125x OCI HelmReleases            | 28s      | 50Mi       |
+| 250x Deployments 250x Services   | 30s      | 32Mi       |
+| 250x YAML HelmReleases           | 54s      | 53Mi       |
+| 250x OCI HelmReleases            | 55s      | 55Mi       |
+| 500x Deployments 500x Services   | 1m01s    | 51Mi       |
+| 500x YAML HelmReleases           | 1m49s    | 63Mi       |
+| 500x OCI HelmReleases            | 1m49s    | 90Mi       |
+| 1000x Deployments 1000x Services | 2m03s    | 58Mi       |
+| 1000x YAML HelmReleases          | 3m43s    | 71Mi       |
+| 1000x OCI HelmReleases           | 3m39s    | 135Mi      |
+
+------------------------------------------------------------------
+
+K8s: 1.29 \
+Declcd: 0.22.9
+
 
 ### Results:
 

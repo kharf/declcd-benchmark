@@ -1,9 +1,9 @@
 module: "github.com/kharf/declcd-benchmark/repository@v0"
 language: {
-	version: "v0.8.2"
+	version: "v0.9.0"
 }
 deps: {
 	"github.com/kharf/declcd/schema@v0": {
-		v: "v0.22.2"
+		v: "v0.23.1"
 	}
 }

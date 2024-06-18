@@ -42,7 +42,7 @@ func main() {
 }
 
 func run(appCount int, yamlHelmAppCount int, ociHelmAppCount int) error {
-	nodeImage := "kindest/node:v1.29.2"
+	nodeImage := "kindest/node:v1.29.4"
 	localRegistryPort := 5000
 
 	sigs := make(chan os.Signal, 1)
