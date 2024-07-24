@@ -9,6 +9,29 @@ Memory: 32GB
 ------------------------------------------------------------------
 
 K8s: 1.29 \
+Declcd: 0.24.9
+
+
+### Results:
+
+| Setup                            | Duration | Max Memory |
+|----------------------------------|----------|------------|
+| 125x Deployments 125x Services   | 16s      | 27Mi       |
+| 125x YAML HelmReleases           | 29s      | 48Mi       |
+| 125x OCI HelmReleases            | 28s      | 50Mi       |
+| 250x Deployments 250x Services   | 32s      | 34Mi       |
+| 250x YAML HelmReleases           | 56s      | 52Mi       |
+| 250x OCI HelmReleases            | 54s      | 56Mi       |
+| 500x Deployments 500x Services   | 1m05s    | 39Mi       |
+| 500x YAML HelmReleases           | 1m45s    | 61Mi       |
+| 500x OCI HelmReleases            | 1m53s    | 84Mi       |
+| 1000x Deployments 1000x Services | 2m11s    | 50Mi       |
+| 1000x YAML HelmReleases          | 3m48s    | 69Mi       |
+| 1000x OCI HelmReleases           | 3m46s    | 137Mi      |
+
+------------------------------------------------------------------
+
+K8s: 1.29 \
 Declcd: 0.23.1
 
 

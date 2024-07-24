@@ -428,7 +428,7 @@ func runDeclcd(done chan bool) error {
 			case <-ticker.C:
 				_ = runCmd(
 					"",
-					"kubectl -n declcd-system top pod gitops-controller-0",
+					"kubectl -n declcd-system top pod --namespace declcd-system",
 				)
 			}
 		}
@@ -436,7 +436,7 @@ func runDeclcd(done chan bool) error {
 
 	if err := runCmd(
 		"",
-		"kubectl wait -n declcd-system --for=condition=Ready pod/gitops-controller-0 --timeout=60s",
+		"kubectl wait -n declcd-system --for=condition=Ready pod -l declcd/shard=primary --timeout=60s",
 	); err != nil {
 		return err
 	}
